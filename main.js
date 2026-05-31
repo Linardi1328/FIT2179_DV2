@@ -346,13 +346,90 @@ function computeBumpRows(stateCore) {
   return { rows: rankedRows, labels: labelRows, years };
 }
 
+function computeStateRecoveryRows(stateCore) {
+  const byState = new Map();
+
+  stateCore.forEach((d) => {
+    const state = canonicalStateName(d.state);
+    if (!byState.has(state)) {
+      byState.set(state, { state, guests_2019: null, guests_2022: null });
+    }
+    const row = byState.get(state);
+    if (+d.year === 2019) row.guests_2019 = +d.international_hotel_guests;
+    if (+d.year === 2022) row.guests_2022 = +d.international_hotel_guests;
+  });
+
+  return Array.from(byState.values())
+    .filter((d) => Number.isFinite(d.guests_2019) && d.guests_2019 > 0 && Number.isFinite(d.guests_2022))
+    .map((d) => ({
+      ...d,
+      recovery_pct: (d.guests_2022 / d.guests_2019) * 100,
+      label_x: (d.guests_2022 / d.guests_2019) * 100 + 2
+    }))
+    .sort((a, b) => b.recovery_pct - a.recovery_pct);
+}
+
+function computeExpenditureWaterfallRows(expenditure) {
+  const grouped = new Map();
+
+  expenditure.forEach((d) => {
+    const key = d.product_short;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        product_short: key,
+        value_2000: 0,
+        value_2020: 0
+      });
+    }
+    const row = grouped.get(key);
+    if (+d.year === 2000) row.value_2000 = +d.expenditure_rm_million;
+    if (+d.year === 2020) row.value_2020 = +d.expenditure_rm_million;
+  });
+
+  const contributions = Array.from(grouped.values())
+    .map((d) => ({
+      product_short: d.product_short,
+      change_rm_million: d.value_2020 - d.value_2000
+    }))
+    .filter((d) => Number.isFinite(d.change_rm_million))
+    .sort((a, b) => Math.abs(b.change_rm_million) - Math.abs(a.change_rm_million));
+
+  let cumulative = 0;
+  const rows = contributions.map((d) => {
+    const start = cumulative;
+    const end = cumulative + d.change_rm_million;
+    cumulative = end;
+    return {
+      category: d.product_short,
+      start,
+      end,
+      amount: d.change_rm_million,
+      label_y: d.change_rm_million >= 0 ? end : start,
+      direction: d.change_rm_million >= 0 ? 'Increase' : 'Decrease',
+      amount_label: `${d.change_rm_million >= 0 ? '+' : '−'}RM ${Math.abs(d.change_rm_million).toFixed(0)}m`
+    };
+  });
+
+  rows.push({
+    category: 'Net change',
+    start: 0,
+    end: cumulative,
+    amount: cumulative,
+    label_y: cumulative,
+    direction: 'Total',
+    amount_label: `${cumulative >= 0 ? '+' : '−'}RM ${Math.abs(cumulative).toFixed(0)}m`
+  });
+
+  return rows;
+}
+
 /* =========================
    MAP HELPERS
    ========================= */
 function buildLegendHTML(labels, colors) {
   return `
     <div class="map-legend-box">
-      <div class="map-legend-title">International guests</div>
+      <div class="map-legend-title">International guests (500k intervals)</div>
       ${labels.map((label, i) => `
         <div class="map-legend-item">
           <span class="map-legend-swatch" style="background:${colors[i]};"></span>
@@ -403,80 +480,60 @@ function enrichMapFeatures(geoFeatures, stateRows) {
   );
 }
 
-function makeFeatureCollection(features) {
-  return {
-    type: "FeatureCollection",
-    features
-  };
-}
-
 function makeMainMapSpec(mapFeatures, intervalDomain, intervalColors) {
-  const featureCollection = makeFeatureCollection(mapFeatures);
-
   return {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    width: 960,
-    height: 680,
+    width:      820,
+    height:     500,
     background: null,
-    autosize: "none",
+    autosize:   "none",
     config: { view: { stroke: null } },
     data: { values: mapFeatures },
     projection: {
-      type: "mercator",
-      fit: featureCollection
+      type:      "mercator",
+      center:    [109.5, 4.5],
+      scale:     2550,
+      translate: [435, 250]
     },
-    mark: {
-      type: "geoshape",
-      stroke: "#ffffff",
-      strokeWidth: 1.15
-    },
+    mark: { type: "geoshape", stroke: "#ffffff", strokeWidth: 1.1 },
     encoding: {
       color: {
-        field: "properties.interval_label",
-        type: "nominal",
-        sort: intervalDomain,
-        scale: { domain: intervalDomain, range: intervalColors },
+        field:  "properties.interval_label",
+        type:   "nominal",
+        sort:   intervalDomain,
+        scale:  { domain: intervalDomain, range: intervalColors },
         legend: null
       },
       tooltip: [
-        { field: "properties.state_key", type: "nominal", title: "State" },
+        { field: "properties.state_key",                type: "nominal",      title: "State" },
         { field: "properties.international_hotel_guests", type: "quantitative", title: "International hotel guests", format: "," },
-        { field: "properties.occupancy_rate", type: "quantitative", title: "Occupancy rate (%)", format: ".1f" }
+        { field: "properties.occupancy_rate",            type: "quantitative", title: "Occupancy rate (%)",          format: ".1f" }
       ]
     }
   };
 }
 
-function makeInsetSpec(selectedFeatures, intervalDomain, intervalColors) {
-  const featureCollection = makeFeatureCollection(selectedFeatures);
-
+function makeInsetSpec(selectedFeatures, center, scale, intervalDomain, intervalColors) {
   return {
     $schema: "https://vega.github.io/schema/vega-lite/v5.json",
-    width: 132,
-    height: 132,
+    width:      128,
+    height:     128,
     background: null,
-    autosize: "none",
+    autosize:   "none",
     config: { view: { stroke: null } },
     data: { values: selectedFeatures },
-    projection: {
-      type: "mercator",
-      fit: featureCollection
-    },
-    mark: {
-      type: "geoshape",
-      stroke: "#273649",
-      strokeWidth: 1.05
-    },
+    projection: { type: "mercator", center, scale, translate: [64, 64] },
+    mark: { type: "geoshape", stroke: "#273649", strokeWidth: 1.05 },
     encoding: {
       color: {
-        field: "properties.interval_label",
-        type: "nominal",
-        sort: intervalDomain,
-        scale: { domain: intervalDomain, range: intervalColors },
+        field:  "properties.interval_label",
+        type:   "nominal",
+        sort:   intervalDomain,
+        scale:  { domain: intervalDomain, range: intervalColors },
         legend: null
       },
       tooltip: [
-        { field: "properties.state_key", type: "nominal", title: "State" },
+        { field: "properties.state_key",                type: "nominal",      title: "State" },
         { field: "properties.international_hotel_guests", type: "quantitative", title: "International hotel guests", format: "," }
       ]
     }
@@ -523,20 +580,20 @@ function renderMapChart(targetId, state2022) {
       <div class="map-clean-wrapper">
         <div class="map-left-rail">
           <div class="map-inset-card">
-            <div class="map-inset-title">Penang</div>
-            <div id="map-inset-penang" class="map-inset-square map-inset-chart"></div>
+            <div class="map-inset-title">Pulau Pinang</div>
+            <div id="map-inset-penang" class="map-inset-circle map-inset-chart"></div>
             <div class="map-inset-caption">Inset zoom for small state visibility.</div>
           </div>
 
           <div class="map-inset-card">
-            <div class="map-inset-title">Kuala Lumpur</div>
-            <div id="map-inset-kl" class="map-inset-square map-inset-chart"></div>
+            <div class="map-inset-title">W.P. Kuala Lumpur</div>
+            <div id="map-inset-kl" class="map-inset-circle map-inset-chart"></div>
             <div class="map-inset-caption">Federal territory shown at readable scale.</div>
           </div>
 
           <div class="map-inset-card">
-            <div class="map-inset-title">Putrajaya</div>
-            <div id="map-inset-putrajaya" class="map-inset-square map-inset-chart"></div>
+            <div class="map-inset-title">W.P. Putrajaya</div>
+            <div id="map-inset-putrajaya" class="map-inset-circle map-inset-chart"></div>
             <div class="map-inset-caption">Small area highlighted without map clutter.</div>
           </div>
         </div>
@@ -548,10 +605,10 @@ function renderMapChart(targetId, state2022) {
       </div>
     `;
 
-    renderChart("map-main-view", makeMainMapSpec(mapFeatures, intervalDomain, intervalColors));
-    renderChart("map-inset-penang", makeInsetSpec(penangFeatures, intervalDomain, intervalColors));
-    renderChart("map-inset-kl", makeInsetSpec(klFeatures, intervalDomain, intervalColors));
-    renderChart("map-inset-putrajaya", makeInsetSpec(putrajayaFeatures, intervalDomain, intervalColors));
+    renderChart("map-main-view",      makeMainMapSpec(mapFeatures, intervalDomain, intervalColors));
+    renderChart("map-inset-penang",   makeInsetSpec(penangFeatures,    [100.33, 5.41],  32000, intervalDomain, intervalColors));
+    renderChart("map-inset-kl",       makeInsetSpec(klFeatures,        [101.69, 3.14],  52000, intervalDomain, intervalColors));
+    renderChart("map-inset-putrajaya",makeInsetSpec(putrajayaFeatures, [101.69, 2.93],  76000, intervalDomain, intervalColors));
 
   } catch (error) {
     console.error("Map preparation failed:", error);
@@ -637,6 +694,7 @@ async function initDashboard() {
 
     /* ── Bump chart ── */
     const bump = computeBumpRows(stateCore);
+    const stateRecoveryRows = computeStateRecoveryRows(stateCore);
 
     /* ── Expenditure ── */
     const expenditure = expenditureRaw.map((d) => ({
@@ -648,6 +706,7 @@ async function initDashboard() {
 
     const expenditureShareChange  = computeExpenditureShareChange(expenditure);
     const expenditureDumbbellRows = computeExpenditureDumbbellRows(expenditureShareChange);
+    const expenditureWaterfallRows = computeExpenditureWaterfallRows(expenditure);
 
     /* ── Derived values used in specs ── */
     const latestRecoveryDate = recoveryQuarterly[recoveryQuarterly.length - 1]?.date;
@@ -677,7 +736,7 @@ async function initDashboard() {
         y: {
           field: "arrivals",
           type:  "quantitative",
-          title: "Arrivals (Millions)",
+          title: "Arrivals",
           axis:  { format: "~s", grid: true }
         },
         tooltip: [
@@ -707,7 +766,7 @@ async function initDashboard() {
             y: {
               field: "recovery_index",
               type:  "quantitative",
-              title: "Recovery index (2019 = 100%)",
+              title: "Recovery index (2019 = 100)",
               axis:  { grid: true }
             },
             tooltip: [
@@ -756,7 +815,7 @@ async function initDashboard() {
         color: {
           field:  "interval_label",
           type:   "nominal",
-          title:  "Arrivals",
+          title:  "Arrivals (300k intervals)",
           sort:   monthlyHeatClassified.labels,
           scale:  { domain: monthlyHeatClassified.labels, range: monthlyHeatClassified.colors },
           legend: { orient: "bottom", direction: "vertical", columns: 1 }
@@ -797,54 +856,70 @@ async function initDashboard() {
 
     const guestsVsOccupancySpec = makeSpec({
       height: 360,
-      data:   { values: state2022 },
+      data: { values: state2022 },
       layer: [
         {
-          mark: { type: "point", filled: true, size: 150, color: "#0072B2", opacity: 0.72 },
+          mark: {
+            type: "point",
+            filled: true,
+            size: 85,
+            color: "#0072B2",
+            opacity: 0.72
+          },
           encoding: {
             x: {
               field: "international_hotel_guests",
-              type:  "quantitative",
-              title: "International hotel guests (Millions)",
-              axis:  { format: "~s", grid: true }
+              type: "quantitative",
+              title: "International hotel guests",
+              axis: { format: "~s", grid: true }
             },
             y: {
               field: "occupancy_rate",
-              type:  "quantitative",
+              type: "quantitative",
               title: "Occupancy rate (%)",
-              axis:  { grid: true }
+              axis: { grid: true }
             },
             tooltip: [
-              { field: "state",                     type: "nominal",      title: "State" },
-              { field: "international_hotel_guests", type: "quantitative", title: "International hotel guests", format: "," },
-              { field: "occupancy_rate",             type: "quantitative", title: "Occupancy rate (%)",          format: ".1f" }
+              { field: "state", type: "nominal", title: "State" },
+              {
+                field: "international_hotel_guests",
+                type: "quantitative",
+                title: "International hotel guests",
+                format: ","
+              },
+              {
+                field: "occupancy_rate",
+                type: "quantitative",
+                title: "Occupancy rate (%)",
+                format: ".1f"
+              }
             ]
           }
         },
         {
-          mark:     { type: "rule", color: "#94a3b8", strokeDash: [5, 4] },
+          mark: { type: "rule", color: "#94a3b8", strokeDash: [5, 4] },
           encoding: { y: { datum: 50 } }
         },
         {
           data: {
             values: [{
               international_hotel_guests: maxGuests2022 * 0.74,
-              occupancy_rate:             50,
-              label:                      "50% occupancy"
+              occupancy_rate: 50,
+              label: "50% occupancy"
             }]
           },
           mark: {
-            type:     "text",
-            align:    "left",
+            type: "text",
+            align: "left",
             baseline: "bottom",
-            dx:       6,
-            dy:       -4,
+            dx: 6,
+            dy: -4,
             fontSize: 11,
-            fill:     "#6b7280"
+            fill: "#6b7280"
           },
           encoding: {
-            x:    { field: "international_hotel_guests", type: "quantitative" },
-            y:    { field: "occupancy_rate",             type: "quantitative" },
+            x: { field: "international_hotel_guests", type: "quantitative" },
+            y: { field: "occupancy_rate", type: "quantitative" },
             text: { field: "label" }
           }
         }
@@ -915,7 +990,7 @@ async function initDashboard() {
               type:  "quantitative",
               title: "Rank",
               scale: { domain: [5.5, 0.5] },
-              axis:  { values: [1, 2, 3, 4, 5], format: "0", grid: true }
+              axis:  { values: [1, 2, 3, 4, 5], grid: true }
             },
             color: {
               field: "state",
@@ -981,6 +1056,96 @@ async function initDashboard() {
               scale: { domain: Object.keys(BUMP_COLORS), range: Object.values(BUMP_COLORS) },
               legend: null
             }
+          }
+        }
+      ]
+    });
+
+    const stateRecoverySpec = makeSpec({
+      height: 500,
+      data: { values: stateRecoveryRows },
+      layer: [
+        {
+          mark: { type: "rule", color: "#d6deea", strokeWidth: 3 },
+          encoding: {
+            y: {
+              field: "state",
+              type: "nominal",
+              sort: stateRecoveryRows.map((d) => d.state),
+              title: null,
+              axis: { labelLimit: 220 }
+            },
+            x: { field: "recovery_pct", type: "quantitative", title: "Recovery vs 2019 (%)", axis: { grid: true }, scale: { domain: [0, 120] } },
+            x2: { value: 0 }
+          }
+        },
+        {
+          mark: { type: "point", filled: true, size: 110, color: "#2F6FB2", stroke: "#ffffff", strokeWidth: 1 },
+          encoding: {
+            y: { field: "state", type: "nominal", sort: stateRecoveryRows.map((d) => d.state) },
+            x: { field: "recovery_pct", type: "quantitative", scale: { domain: [0, 120] } },
+            tooltip: [
+              { field: "state", type: "nominal", title: "State" },
+              { field: "guests_2019", type: "quantitative", title: "2019 guests", format: "," },
+              { field: "guests_2022", type: "quantitative", title: "2022 guests", format: "," },
+              { field: "recovery_pct", type: "quantitative", title: "Recovery (%)", format: ".1f" }
+            ]
+          }
+        },
+        {
+          mark: { type: "rule", color: "#94a3b8", strokeDash: [5, 4] },
+          encoding: { x: { datum: 100 } }
+        },
+        {
+          mark: { type: "text", align: "left", baseline: "middle", dx: 8, fontSize: 11, fill: "#111827" },
+          encoding: {
+            y: { field: "state", type: "nominal", sort: stateRecoveryRows.map((d) => d.state) },
+            x: { field: "label_x", type: "quantitative", scale: { domain: [0, 120] } },
+            text: { field: "recovery_pct", type: "quantitative", format: ".1f" }
+          }
+        }
+      ]
+    });
+
+    const expenditureWaterfallSpec = makeSpec({
+      height: 420,
+      data: { values: expenditureWaterfallRows },
+      layer: [
+        {
+          transform: [{ filter: "datum.category !== 'Net change'" }],
+          mark: { type: "rule", color: "#cbd5e1", strokeWidth: 2 },
+          encoding: {
+            x: { field: "category", type: "ordinal", sort: expenditureWaterfallRows.map((d) => d.category), title: null, axis: { labelAngle: -20 } },
+            x2: { field: "category" },
+            y: { field: "start", type: "quantitative", title: "Change in expenditure (RM million)", axis: { grid: true } },
+            y2: { field: "end" },
+            detail: { field: "category" }
+          }
+        },
+        {
+          mark: { type: "bar", cornerRadiusTopLeft: 3, cornerRadiusTopRight: 3, cornerRadiusBottomLeft: 3, cornerRadiusBottomRight: 3 },
+          encoding: {
+            x: { field: "category", type: "ordinal", sort: expenditureWaterfallRows.map((d) => d.category), title: null, axis: { labelAngle: -20 } },
+            y: { field: "start", type: "quantitative", title: "Change in expenditure (RM million)" },
+            y2: { field: "end" },
+            color: {
+              field: "direction",
+              type: "nominal",
+              scale: { domain: ["Increase", "Decrease", "Total"], range: ["#2F6FB2", "#E69F00", "#0F1F3A"] },
+              legend: null
+            },
+            tooltip: [
+              { field: "category", type: "nominal", title: "Category" },
+              { field: "amount", type: "quantitative", title: "Change (RM million)", format: ",.1f" }
+            ]
+          }
+        },
+        {
+          mark: { type: "text", align: "center", baseline: "bottom", dy: -4, fontSize: 11, fill: "#111827" },
+          encoding: {
+            x: { field: "category", type: "ordinal", sort: expenditureWaterfallRows.map((d) => d.category), title: null },
+            y: { field: "label_y", type: "quantitative" },
+            text: { field: "amount_label" }
           }
         }
       ]
@@ -1090,17 +1255,19 @@ async function initDashboard() {
     });
 
     /* ── Render all charts ── */
-    renderChart("chart-monthly-arrivals",         monthlyArrivalsSpec);
-    renderChart("chart-recovery-index",           recoveryIndexSpec);
-    renderChart("chart-seasonality-heatmap",      seasonalityHeatmapSpec);
-    renderChart("chart-occupancy-state",          occupancyStateSpec);
-    renderChart("chart-guests-vs-occupancy",      guestsVsOccupancySpec);
-    renderChart("chart-guest-mix",                guestMixSpec);
-    renderChart("chart-state-change-bars",        bumpChartSpec);
-    renderChart("chart-expenditure-area",         expenditureAreaSpec);
+    renderChart("chart-monthly-arrivals", monthlyArrivalsSpec);
+    renderChart("chart-recovery-index", recoveryIndexSpec);
+    renderChart("chart-seasonality-heatmap", seasonalityHeatmapSpec);
+    renderChart("chart-occupancy-state", occupancyStateSpec);
+    renderChart("chart-guests-vs-occupancy", guestsVsOccupancySpec);
+    renderChart("chart-guest-mix", guestMixSpec);
+    renderChart("chart-state-recovery", stateRecoverySpec);
+    renderChart("chart-state-change-bars", bumpChartSpec);
+    renderChart("chart-expenditure-area", expenditureAreaSpec);
     renderChart("chart-expenditure-share-change", expenditureShareDumbbellSpec);
+    renderChart("chart-expenditure-waterfall", expenditureWaterfallSpec);
 
-    // Map uses only the embedded TopoJSON — no extra fetch needed.
+    /* main map + separate inset maps */
     renderMapChart("chart-state-map", state2022);
 
   } catch (error) {
